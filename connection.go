@@ -12,7 +12,9 @@ import (
 	"crypto/tls"
 	"database/sql/driver"
 	"errors"
+	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -156,28 +158,67 @@ func (mc *mysqlConn) Prepare(query string) (driver.Stmt, error) {
 	return stmt, err
 }
 
+func mysqlEscape(s string) string {
+	s = strings.Replace(s, "\\", "\\\\", -1)
+	s = strings.Replace(s, "\n", "\\n", -1)
+	s = strings.Replace(s, "\r", "\\r", -1)
+	s = strings.Replace(s, `'`, `\'`, -1)
+	s = strings.Replace(s, `"`, `\"`, -1)
+	s = strings.Replace(s, "\x1a", "\\Z", -1)
+	return s
+}
+
+func clientPrepare(query string, args []driver.Value) (string, error) {
+	prepStmt := query
+	if strings.Count(prepStmt, "?") != len(args) {
+		return "", fmt.Errorf("invalid prepare statement")
+	}
+	for _, arg := range args {
+		var valueStr string
+		switch arg.(type) {
+		case string:
+			valueStr = "'" + mysqlEscape(arg.(string)) + "'"
+		case int64:
+			valueStr = strconv.Itoa(int(arg.(int64)))
+		case float64:
+			valueStr = strconv.FormatFloat(arg.(float64), 'f', 7, 64)
+		case time.Time:
+			valueStr = arg.(time.Time).Format("2006-01-02 15:04:05")
+		case []byte:
+			valueStr = fmt.Sprintf("x'%x'", arg.([]byte))
+		default:
+			return "", fmt.Errorf("not support type yet")
+		}
+		prepStmt = strings.Replace(prepStmt, "?", valueStr, 1)
+	}
+
+	return prepStmt, nil
+}
+
 func (mc *mysqlConn) Exec(query string, args []driver.Value) (driver.Result, error) {
 	if mc.netConn == nil {
 		errLog.Print(errInvalidConn)
 		return nil, driver.ErrBadConn
 	}
-	if len(args) == 0 { // no args, fastpath
-		mc.affectedRows = 0
-		mc.insertId = 0
+	// with args, must use prepared stmt
+	// do client side prepare
 
-		err := mc.exec(query)
-		if err == nil {
-			return &mysqlResult{
-				affectedRows: int64(mc.affectedRows),
-				insertId:     int64(mc.insertId),
-			}, err
-		}
+	query, err := clientPrepare(query, args)
+	if err != nil {
 		return nil, err
 	}
 
-	// with args, must use prepared stmt
-	return nil, driver.ErrSkip
+	mc.affectedRows = 0
+	mc.insertId = 0
 
+	err = mc.exec(query)
+	if err == nil {
+		return &mysqlResult{
+			affectedRows: int64(mc.affectedRows),
+			insertId:     int64(mc.insertId),
+		}, err
+	}
+	return nil, err
 }
 
 // Internal function to execute commands
@@ -206,29 +247,27 @@ func (mc *mysqlConn) Query(query string, args []driver.Value) (driver.Rows, erro
 		errLog.Print(errInvalidConn)
 		return nil, driver.ErrBadConn
 	}
-	if len(args) == 0 { // no args, fastpath
-		// Send command
-		err := mc.writeCommandPacketStr(comQuery, query)
+
+	query, err := clientPrepare(query, args)
+	// Send command
+	err = mc.writeCommandPacketStr(comQuery, query)
+	if err == nil {
+		// Read Result
+		var resLen int
+		resLen, err = mc.readResultSetHeaderPacket()
 		if err == nil {
-			// Read Result
-			var resLen int
-			resLen, err = mc.readResultSetHeaderPacket()
-			if err == nil {
-				rows := new(textRows)
-				rows.mc = mc
+			rows := new(textRows)
+			rows.mc = mc
 
-				if resLen > 0 {
-					// Columns
-					rows.columns, err = mc.readColumns(resLen)
-				}
-				return rows, err
+			if resLen > 0 {
+				// Columns
+				rows.columns, err = mc.readColumns(resLen)
 			}
+			return rows, err
 		}
-		return nil, err
 	}
+	return nil, err
 
-	// with args, must use prepared stmt
-	return nil, driver.ErrSkip
 }
 
 // Gets the value of the given MySQL System Variable
