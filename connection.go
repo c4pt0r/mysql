@@ -173,6 +173,10 @@ func clientPrepare(query string, args []driver.Value) (string, error) {
 	if strings.Count(prepStmt, "?") != len(args) {
 		return "", fmt.Errorf("invalid prepare statement")
 	}
+
+	prepFmtStmt := strings.Replace(prepStmt, "?", "%s", -1)
+
+	var arguments []interface{}
 	for _, arg := range args {
 		var valueStr string
 		switch arg.(type) {
@@ -189,10 +193,11 @@ func clientPrepare(query string, args []driver.Value) (string, error) {
 		default:
 			return "", fmt.Errorf("not support type yet")
 		}
-		prepStmt = strings.Replace(prepStmt, "?", valueStr, 1)
+		arguments = append(arguments, valueStr)
 	}
 
-	return prepStmt, nil
+	sql := fmt.Sprintf(prepFmtStmt, arguments...)
+	return sql, nil
 }
 
 func (mc *mysqlConn) Exec(query string, args []driver.Value) (driver.Result, error) {
