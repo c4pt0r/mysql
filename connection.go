@@ -187,7 +187,7 @@ func clientPrepare(query string, args []driver.Value) (string, error) {
 		case float64:
 			valueStr = strconv.FormatFloat(arg.(float64), 'f', 7, 64)
 		case time.Time:
-			valueStr = arg.(time.Time).Format("2006-01-02 15:04:05")
+			valueStr = "'" + arg.(time.Time).Format("2006-01-02 15:04:05") + "'"
 		case []byte:
 			valueStr = fmt.Sprintf("x'%x'", arg.([]byte))
 		default:
