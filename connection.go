@@ -20,17 +20,18 @@ import (
 )
 
 type mysqlConn struct {
-	buf              *buffer
-	netConn          net.Conn
-	affectedRows     uint64
-	insertId         uint64
-	cfg              *config
-	maxPacketAllowed int
-	maxWriteSize     int
-	flags            clientFlag
-	sequence         uint8
-	parseTime        bool
-	strict           bool
+	buf                *buffer
+	netConn            net.Conn
+	affectedRows       uint64
+	insertId           uint64
+	cfg                *config
+	maxPacketAllowed   int
+	maxWriteSize       int
+	flags              clientFlag
+	sequence           uint8
+	parseTime          bool
+	strict             bool
+	useServerPrepStmts bool
 }
 
 type config struct {
@@ -86,6 +87,13 @@ func (mc *mysqlConn) handleParams() (err error) {
 		case "compress":
 			err = errors.New("Compression not implemented yet")
 			return
+
+		case "useServerPrepStmts":
+			var isBool bool
+			mc.useServerPrepStmts, isBool = readBool(val)
+			if !isBool {
+				return errors.New("Invalid Bool value: " + val)
+			}
 
 		// System Vars
 		default:
@@ -205,25 +213,26 @@ func (mc *mysqlConn) Exec(query string, args []driver.Value) (driver.Result, err
 		errLog.Print(errInvalidConn)
 		return nil, driver.ErrBadConn
 	}
-	// with args, must use prepared stmt
-	// do client side prepare
+	if len(args) == 0 || !mc.useServerPrepStmts { // no args, fastpath
+		query, err := clientPrepare(query, args)
+		if err != nil {
+			return nil, err
+		}
 
-	query, err := clientPrepare(query, args)
-	if err != nil {
+		mc.affectedRows = 0
+		mc.insertId = 0
+
+		err = mc.exec(query)
+		if err == nil {
+			return &mysqlResult{
+				affectedRows: int64(mc.affectedRows),
+				insertId:     int64(mc.insertId),
+			}, err
+		}
 		return nil, err
 	}
-
-	mc.affectedRows = 0
-	mc.insertId = 0
-
-	err = mc.exec(query)
-	if err == nil {
-		return &mysqlResult{
-			affectedRows: int64(mc.affectedRows),
-			insertId:     int64(mc.insertId),
-		}, err
-	}
-	return nil, err
+	// with args, must use prepared stmt
+	return nil, driver.ErrSkip
 }
 
 // Internal function to execute commands
@@ -252,27 +261,31 @@ func (mc *mysqlConn) Query(query string, args []driver.Value) (driver.Rows, erro
 		errLog.Print(errInvalidConn)
 		return nil, driver.ErrBadConn
 	}
-
-	query, err := clientPrepare(query, args)
-	// Send command
-	err = mc.writeCommandPacketStr(comQuery, query)
-	if err == nil {
-		// Read Result
-		var resLen int
-		resLen, err = mc.readResultSetHeaderPacket()
+	if len(args) == 0 || !mc.useServerPrepStmts { // no args, fastpath
+		query, err := clientPrepare(query, args)
+		// Send command
+		err = mc.writeCommandPacketStr(comQuery, query)
 		if err == nil {
-			rows := new(textRows)
-			rows.mc = mc
+			// Read Result
+			var resLen int
+			resLen, err = mc.readResultSetHeaderPacket()
+			if err == nil {
+				rows := new(textRows)
+				rows.mc = mc
 
-			if resLen > 0 {
+				if resLen == 0 {
+					// no columns, no more data
+					return emptyRows{}, nil
+				}
 				// Columns
 				rows.columns, err = mc.readColumns(resLen)
+				return rows, err
 			}
-			return rows, err
 		}
+		return nil, err
 	}
-	return nil, err
 
+	return nil, driver.ErrSkip
 }
 
 // Gets the value of the given MySQL System Variable
