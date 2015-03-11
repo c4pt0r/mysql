@@ -16,7 +16,7 @@ func (tx *mysqlTx) Commit() (err error) {
 	if tx.mc == nil || tx.mc.netConn == nil {
 		return errInvalidConn
 	}
-	err = tx.mc.exec("COMMIT")
+	err = tx.mc.exec("SET AUTOCOMMIT 1")
 	tx.mc = nil
 	return
 }

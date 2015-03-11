@@ -112,7 +112,7 @@ func (mc *mysqlConn) Begin() (driver.Tx, error) {
 		errLog.Print(errInvalidConn)
 		return nil, driver.ErrBadConn
 	}
-	err := mc.exec("START TRANSACTION")
+	err := mc.exec("SET AUTOCOMMIT 0")
 	if err == nil {
 		return &mysqlTx{mc}, err
 	}
